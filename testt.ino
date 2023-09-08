@@ -1,10 +1,19 @@
+// https://github.com/avishorp/TM1637.git
+#include <TM1637Display.h>
+
 #include "string.h"
 
 static const uint8_t ButtonTurnDownFanPin = A5;
+static const uint8_t TM1637Toggle = A4;
 static const uint8_t ButtonTurnUpFanPin = 10;
 static const uint8_t ButtonFanMiddleSpinPin = 4;
 static const uint8_t ReadPwmViaInterrupt = 2;
 static const uint8_t FanAmpleIndicator = 12;
+static const uint8_t TM1637CLK = 5;
+static const uint8_t TM1637DIO = 6;
+TM1637Display tm1637 = TM1637Display(TM1637CLK, TM1637DIO, 80);
+// const uint8_t tm1637_void_pattern[] = {0x00, 0x00, 0x00, 0x00};
+// const uint8_t tm1637_all_pattern[] = {0xff, 0xff, 0xff, 0xff};
 
 /*
  * For Timer2 OC2B for 25 kHz PWM
@@ -25,7 +34,7 @@ void pwm_counter_isr() {
     falling_edges += 1;
 }
 
-static const int BufLen = 255;
+// static const int BufLen = 255;
 static const unsigned long DelayTime = 20;  // In ms, determines the loop delay
 
 class FanControlState {
@@ -101,6 +110,7 @@ void setup() {
     pinMode(ButtonTurnDownFanPin, INPUT);
     pinMode(ButtonTurnUpFanPin, INPUT);
     pinMode(ButtonFanMiddleSpinPin, INPUT_PULLUP);
+    pinMode(TM1637Toggle, INPUT_PULLUP);
     pinMode(ControlFanPWMPin, OUTPUT);
     pinMode(ReadPwmViaInterrupt, INPUT);
     pinMode(FanAmpleIndicator, OUTPUT);
@@ -129,38 +139,58 @@ void setup() {
     OCR2A = OCR2A__;
     OCR2B = DEFAULT_PWM_DUTY;  // initial PWM set at around 25% duty
 
-    Serial.begin(9600);
+    // Serial.begin(9600);
+    tm1637.setBrightness(0, true);
+    tm1637.clear();
 }
 
 void loop() {
     static int counter = 0;
-    static char buf[BufLen];
+    // static char buf[BufLen];
     static FanControlState fcs;
-    static const unsigned serial_period = 80;
-    static unsigned serial_clock = 0;
+    static const unsigned clock_period = 72;
+    static unsigned clock = 0;
+    static bool tm1637_on = false;
+    static const unsigned short tm1637_button_debounce_thres = 5;
+    static unsigned short tm1637_debounce = tm1637_button_debounce_thres;
 
     const bool UpButton = digitalRead(ButtonTurnUpFanPin) == HIGH;
     const bool DownButton = digitalRead(ButtonTurnDownFanPin) == HIGH;
     const bool ConstButton = digitalRead(ButtonFanMiddleSpinPin) == LOW;
+    const bool TM1637Button = digitalRead(TM1637Toggle) == LOW;
+
+    if (TM1637Button) {
+        if (tm1637_debounce == 0) {
+            tm1637_on = !tm1637_on;
+        }
+        tm1637_debounce = tm1637_button_debounce_thres;
+    } else if (tm1637_debounce > 0) {
+        tm1637_debounce = (tm1637_debounce == 1) ? 0 : tm1637_debounce - 1;
+    }
 
     fcs.change_state(UpButton, DownButton, ConstButton);
     fcs.apply_pwm();
 
-    if (0 == serial_clock) {
+    if (0 == clock) {
         const unsigned reg = OCR2B;
-        memset(buf, 0, BufLen);
+        // memset(buf, 0, BufLen);
         noInterrupts();
         const unsigned long fes = falling_edges;
         falling_edges = 0;
         interrupts();
-        const unsigned long rpm = (fes * 30000ul) / ((unsigned long)serial_period * (unsigned long)DelayTime);
-        sprintf(buf, "OCR2B=%u, UpButton%d, DownButton%d, ConstButton%d, fes%d, rpm%04X_%ld, ", reg, UpButton, DownButton, ConstButton, fes, rpm, rpm);
+        const unsigned long rpm = (fes * 30000ul) / ((unsigned long)clock_period * (unsigned long)DelayTime);
+        // sprintf(buf, "OCR2B=%u, UpButton%d, DownButton%d, ConstButton%d, fes%d, rpm%04X_%ld, ", reg, UpButton, DownButton, ConstButton, fes, rpm, rpm);
         // fcs.dump(buf + strlen(buf));
         digitalWrite(FanAmpleIndicator, (reg >= AMPLE_PWM_DUTY) ? HIGH : LOW);
-        Serial.println(buf);
+        // Serial.println(buf);
+        if (tm1637_on) {
+            tm1637.showNumberDec((int)rpm, true);
+        } else {
+            tm1637.clear();
+        }
     }
 
-    serial_clock = (serial_clock < serial_period - 1) ? serial_clock + 1 : 0;
+    clock = (clock < clock_period - 1) ? clock + 1 : 0;
     fcs.tick();
     delay(DelayTime);
 }
