@@ -1,4 +1,3 @@
-// https://github.com/avishorp/TM1637.git
 #include <TM1637Display.h>
 
 #include "string.h"
@@ -151,7 +150,7 @@ void loop() {
     static const unsigned clock_period = 72;
     static unsigned clock = 0;
     static bool tm1637_on = false;
-    static const unsigned short tm1637_button_debounce_thres = 5;
+    static const unsigned short tm1637_button_debounce_thres = 3;
     static unsigned short tm1637_debounce = tm1637_button_debounce_thres;
 
     const bool UpButton = digitalRead(ButtonTurnUpFanPin) == HIGH;
