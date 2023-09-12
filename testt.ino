@@ -20,9 +20,9 @@ TM1637Display tm1637 = TM1637Display(TM1637CLK, TM1637DIO, 80);
 static const uint8_t ControlFanPWMPin = 3;              // Timer2 OC2A on Arduino Nano
 static const auto TCCR2A__ = _BV(COM2B1) | _BV(WGM20);  // Phase Correct PWM allows for easy 0% PWM
 static const auto TCCR2B__ = _BV(CS21) | _BV(WGM22);    // No scaling (16 MHz), use OC2A to fine tune resulting freq.
-static const unsigned OCR2A__ = 79;                     // Both for PWM granularity and down-scaling to 25 kHz.
-static const unsigned DEFAULT_PWM_DUTY = OCR2A__ / 4;
-static const unsigned AMPLE_PWM_DUTY = OCR2A__ / 5;
+static const unsigned MAX_DUTY_OCR2A = 79;              // Both for PWM granularity and down-scaling to 25 kHz.
+static const unsigned DEFAULT_PWM_DUTY = MAX_DUTY_OCR2A / 4;
+static const unsigned AMPLE_PWM_DUTY = MAX_DUTY_OCR2A / 5;
 /*
  * Above is Timer2 OC2B PWM config.
  */
@@ -48,10 +48,10 @@ class FanControlState {
     unsigned state;
     unsigned short clock;
     unsigned short clock_tick;
-    static const unsigned short period;
+    const unsigned short period;
 
    public:
-    FanControlState() : fc(None), state(0), clock(0), clock_tick(1) {}
+    FanControlState(const unsigned short period) : fc(None), state(0), clock(0), clock_tick(1), period(period) {}
     void change_state(bool up_button, bool down_button, bool const_button) {
         if ((fc == Down && down_button) || (fc == Up && up_button)) {
             if (state == period) {
@@ -76,7 +76,7 @@ class FanControlState {
             if (fc == Down) {
                 OCR2B = (OCR2B > 0) ? OCR2B - 1 : 0;
             } else if (fc == Up) {
-                OCR2B = (OCR2B < OCR2A__) ? OCR2B + 1 : OCR2A__;
+                OCR2B = (OCR2B < MAX_DUTY_OCR2A) ? OCR2B + 1 : MAX_DUTY_OCR2A;
             } else if (fc == ConstantMiddle) {
                 OCR2B = DEFAULT_PWM_DUTY;
             }
@@ -102,7 +102,84 @@ class FanControlState {
     }
 };
 
-const unsigned short FanControlState::period = 36;
+class Control1637State {
+   public:
+    Control1637State(const unsigned short db, const unsigned short sw) : debounce_thres(db), sticky_thres(sw), debounce(0), sticky(0), disp_now(On), disp_prev(On) {}
+    void change_state(bool button) {
+        if (button) {
+            if (debounce == 0) {
+                if (sticky > 0) {
+                    // sticky key
+                    // user is switching type of display, rather than switching on/off
+                    // restore previous display on/off information
+                    disp_now = disp_prev;
+                    dk = (RPM == dk) ? Duty : RPM;
+                    sticky = 0;
+                } else {
+                    disp_prev = disp_now;
+                    disp_now = MaySwitch;
+                }
+            }
+            debounce = debounce_thres;
+        }
+    }
+    void tick() {
+        if (debounce > 0) {
+            if (1 == debounce) {
+                debounce = 0;
+                sticky = sticky_thres;
+            } else {
+                debounce -= 1;
+            }
+        } else if (sticky > 0) {
+            sticky = (1 == sticky) ? 0 : sticky - 1;
+            if (0 == sticky && MaySwitch == disp_now) {
+                disp_now = (On == disp_prev) ? Off : On;
+            }
+        }
+    }
+    void apply_display(TM1637Display& tm1637, const unsigned long& rpm, const unsigned& duty_reg) const {
+        if (On == disp_now || (On == disp_prev && MaySwitch == disp_now)) {
+            switch (dk) {
+                case RPM:
+                    tm1637.showNumberDec((int)rpm);
+                    break;
+                case Duty:
+                    static const uint8_t percent_segments = SEG_A | SEG_C | SEG_D | SEG_F;
+                    // upper-left, up, lower-right, bottom
+                    int duty = (int)((unsigned long)duty_reg * 1000ul / (unsigned long)MAX_DUTY_OCR2A / 10ul);
+                    if (duty > 100) {
+                        duty = 100;
+                    } else if (duty < 0) {
+                        duty = 0;
+                    }
+                    tm1637.showNumberDec(duty, false, 3, 0);
+                    tm1637.setSegments(&percent_segments, 1, 3);
+                    break;
+            }
+        } else {
+            tm1637.clear();
+        }
+    }
+
+   private:
+    typedef enum DisplayKind {
+        RPM,
+        Duty,
+    } DisplayKind;
+    DisplayKind dk;
+    typedef enum DisplayOnOff {
+        Off,
+        MaySwitch,
+        On,
+    } DisplayOnOff;
+    DisplayOnOff disp_now;
+    DisplayOnOff disp_prev;
+    unsigned short debounce;
+    unsigned short sticky;
+    const unsigned short debounce_thres;
+    const unsigned short sticky_thres;
+};
 
 void setup() {
     pinMode(LED_BUILTIN, OUTPUT);
@@ -135,7 +212,7 @@ void setup() {
     // No scaling, Arduino is 16M
     // Phase Correct, OCRA as TOP s.t. output is 25K.
     TCCR2B = TCCR2B__;
-    OCR2A = OCR2A__;
+    OCR2A = MAX_DUTY_OCR2A;
     OCR2B = DEFAULT_PWM_DUTY;  // initial PWM set at around 25% duty
 
     // Serial.begin(9600);
@@ -146,28 +223,18 @@ void setup() {
 void loop() {
     static int counter = 0;
     // static char buf[BufLen];
-    static FanControlState fcs;
+    static FanControlState fcs(36);
+    static Control1637State c1s(3, 400 / DelayTime);
     static const unsigned clock_period = 72;
     static unsigned clock = 0;
-    static bool tm1637_on = false;
-    static const unsigned short tm1637_button_debounce_thres = 3;
-    static unsigned short tm1637_debounce = tm1637_button_debounce_thres;
 
     const bool UpButton = digitalRead(ButtonTurnUpFanPin) == HIGH;
     const bool DownButton = digitalRead(ButtonTurnDownFanPin) == HIGH;
     const bool ConstButton = digitalRead(ButtonFanMiddleSpinPin) == LOW;
     const bool TM1637Button = digitalRead(TM1637Toggle) == LOW;
 
-    if (TM1637Button) {
-        if (tm1637_debounce == 0) {
-            tm1637_on = !tm1637_on;
-        }
-        tm1637_debounce = tm1637_button_debounce_thres;
-    } else if (tm1637_debounce > 0) {
-        tm1637_debounce = (tm1637_debounce == 1) ? 0 : tm1637_debounce - 1;
-    }
-
     fcs.change_state(UpButton, DownButton, ConstButton);
+    c1s.change_state(TM1637Button);
     fcs.apply_pwm();
 
     if (0 == clock) {
@@ -182,14 +249,11 @@ void loop() {
         // fcs.dump(buf + strlen(buf));
         digitalWrite(FanAmpleIndicator, (reg >= AMPLE_PWM_DUTY) ? HIGH : LOW);
         // Serial.println(buf);
-        if (tm1637_on) {
-            tm1637.showNumberDec((int)rpm, true);
-        } else {
-            tm1637.clear();
-        }
+        c1s.apply_display(tm1637, rpm, reg);
     }
 
     clock = (clock < clock_period - 1) ? clock + 1 : 0;
     fcs.tick();
+    c1s.tick();
     delay(DelayTime);
 }
