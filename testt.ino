@@ -12,7 +12,7 @@ static const uint8_t TM1637CLK = 5;
 static const uint8_t TM1637DIO = 6;
 TM1637Display tm1637 = TM1637Display(TM1637CLK, TM1637DIO, 80);
 // const uint8_t tm1637_void_pattern[] = {0x00, 0x00, 0x00, 0x00};
-// const uint8_t tm1637_all_pattern[] = {0xff, 0xff, 0xff, 0xff};
+const uint8_t tm1637_all_pattern[] = {0xff, 0xff, 0xff, 0xff};
 
 /*
  * For Timer2 OC2B for 25 kHz PWM
@@ -20,7 +20,7 @@ TM1637Display tm1637 = TM1637Display(TM1637CLK, TM1637DIO, 80);
 static const uint8_t ControlFanPWMPin = 3;              // Timer2 OC2A on Arduino Nano
 static const auto TCCR2A__ = _BV(COM2B1) | _BV(WGM20);  // Phase Correct PWM allows for easy 0% PWM
 static const auto TCCR2B__ = _BV(CS21) | _BV(WGM22);    // No scaling (16 MHz), use OC2A to fine tune resulting freq.
-static const unsigned MAX_DUTY_OCR2A = 79;              // Both for PWM granularity and down-scaling to 25 kHz.
+static const unsigned MAX_DUTY_OCR2A = 40;              // Both for PWM granularity and down-scaling to 25 kHz.
 static const unsigned DEFAULT_PWM_DUTY = MAX_DUTY_OCR2A / 4;
 static const unsigned AMPLE_PWM_DUTY = MAX_DUTY_OCR2A / 5;
 /*
@@ -249,7 +249,11 @@ void loop() {
         // fcs.dump(buf + strlen(buf));
         digitalWrite(FanAmpleIndicator, (reg >= AMPLE_PWM_DUTY) ? HIGH : LOW);
         // Serial.println(buf);
-        c1s.apply_display(tm1637, rpm, reg);
+        if (0 == rpm) {
+            tm1637.setSegments(tm1637_all_pattern);
+        } else {
+            c1s.apply_display(tm1637, rpm, reg);
+        }
     }
 
     clock = (clock < clock_period - 1) ? clock + 1 : 0;
